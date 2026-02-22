@@ -1,14 +1,13 @@
 package com.clogger;
 
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.inject.Provides;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.events.*;
 import net.runelite.api.widgets.Widget;
-import net.runelite.api.widgets.WidgetID;
+import net.runelite.api.widgets.InterfaceID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -377,7 +376,7 @@ public class CloggerPlugin extends Plugin
 			heartbeatTicks = 0;
 		}
 
-		Widget collectionLog = client.getWidget(WidgetID.COLLECTION_LOG_ID, 0);
+		Widget collectionLog = client.getWidget(InterfaceID.COLLECTION_LOG, 0);
 		boolean currentlyOpen = collectionLog != null && !collectionLog.isHidden();
 
 		if (!isLogOpen && currentlyOpen) {
@@ -410,7 +409,7 @@ public class CloggerPlugin extends Plugin
 	@Subscribe
 	public void onWidgetLoaded(WidgetLoaded event) {
 		// Collection Log widget loaded - enable auto-search trigger
-		if (event.getGroupId() == WidgetID.COLLECTION_LOG_ID) {
+		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
 			triggerSyncAllowed = true;
 			log.debug("Collection Log opened. Auto-search enabled.");
 		}
@@ -556,7 +555,7 @@ public class CloggerPlugin extends Plugin
 		export.put("collection_log", tabsMap);
 
 		// Pretty print JSON
-		Gson gsonPretty = new GsonBuilder().setPrettyPrinting().create();
+		Gson gsonPretty = gson.newBuilder().setPrettyPrinting().create();
 		String json = gsonPretty.toJson(export);
 
 		//log.info("Collection Log Exported ({} chars)", json.length());
