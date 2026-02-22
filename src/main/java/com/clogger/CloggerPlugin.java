@@ -41,18 +41,12 @@ public class CloggerPlugin extends Plugin
 	@Inject private OkHttpClient okHttpClient;
 	@Inject private Gson gson;
 
-	//Cache
 	private final Map<Integer, Integer> sessionClogCache = new HashMap<>();
 	private final Map<Skill, Integer> lastXpMap = new HashMap<>();
 	private final Map<Skill, Integer> lastLevelMap = new HashMap<>();
-
-	// Stores item name and real ID
 	private final Map<String, Integer> realIdMap = new HashMap<>();
-
-	// Item allow list
 	private final Set<Integer> collectionLogAllowList = new HashSet<>();
 
-	// Cache and State Flags
 	private String cachedUsername = null;
 	private long cachedAccountHash = -1;
 	private boolean baselineCaptured = false;
@@ -67,20 +61,14 @@ public class CloggerPlugin extends Plugin
 	private int lastUnlockId = -1;
 	private long lastUnlockTime = 0;
 
-	// Collection Log Auto-Sync State
 	private boolean isLogOpen = false;
 	private final List<LogItem> sessionData = new ArrayList<>();
-	private boolean triggerSyncAllowed = false;
-	private Integer gameTickToSync = null;
-	private static final int SYNC_DELAY_TICKS = 2; // ~1.2 seconds for batching
 
-	// Data Structures
 	private static class StatEntry {
 		int level; long xp; String type;
 		public StatEntry(int level, long xp, String type) { this.level=level; this.xp=xp; this.type=type; }
 	}
 
-	// Data to send to clogger server
 	private static class Payload {
 		String username; long accountHash; String source;
 		List<LogItem> items; Map<String, StatEntry> stats;
@@ -91,27 +79,25 @@ public class CloggerPlugin extends Plugin
 
 	@Override
 	protected void startUp() throws Exception {
-		//log.info("Clogger started!");
 		clientThread.invokeLater(this::buildAllowList);
 	}
 
 	@Override
 	protected void shutDown() throws Exception {
-		//log.info("Clogger stopped!");
 		if (baselineCaptured) checkAndSendStats("shutdown");
 		sessionData.clear();
 		sessionClogCache.clear();
 		collectionLogAllowList.clear();
+		realIdMap.clear();
 		lastXpMap.clear();
 		lastLevelMap.clear();
 	}
 
-	// Builds the 'allow list' of items in the collection log
 	private void buildAllowList() {
 		collectionLogAllowList.clear();
 		realIdMap.clear();
 
-		EnumComposition topLevelEnum = client.getEnum(2102); // The Master Collection Log List
+		EnumComposition topLevelEnum = client.getEnum(2102);
 		if (topLevelEnum == null) return;
 
 		for (int structId : topLevelEnum.getIntVals()) {
@@ -129,16 +115,12 @@ public class CloggerPlugin extends Plugin
 				if (itemListEnum == null) continue;
 
 				for (int realId : itemListEnum.getIntVals()) {
-					// 1. Add to Allow List (for validation)
 					collectionLogAllowList.add(realId);
-
-					// 2. Map Name to Real ID. This creates the bridge - Sync Script finds name "Unsired", this map gives ID 13273
 					String name = itemManager.getItemComposition(realId).getName();
 					realIdMap.put(name, realId);
 				}
 			}
 		}
-		//log.info("Clogger: Indexed {} items from cache.", realIdMap.size());
 	}
 
 	@Subscribe
@@ -152,7 +134,6 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
-	// Stat tracking
 	private void captureCurrentStats() {
 		if (client.getLocalPlayer() == null) return;
 		cachedUsername = client.getLocalPlayer().getName();
@@ -180,7 +161,6 @@ public class CloggerPlugin extends Plugin
 		boolean forceSend = source.equals("logout_stats") || source.equals("shutdown");
 
 		if (changed || forceSend) {
-			// log.info("Clogger: Uploading Stats (Source: {} | Force: {})", source, forceSend);
 			uploadStats(source);
 			if (client.getGameState() == GameState.LOGGED_IN) {
 				captureCurrentStats();
@@ -188,36 +168,34 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
-	//Gather stats and prepare to upload
 	private void uploadStats(String source) {
-        int checkTotal = 0;
+		int checkTotal = 0;
 
 		for (Skill s : Skill.values()) {
-             if (s != Skill.OVERALL) checkTotal += client.getRealSkillLevel(s);
-        }
+			if (s != Skill.OVERALL) checkTotal += client.getRealSkillLevel(s);
+		}
 
-        if (checkTotal < 10) return;
+		if (checkTotal < 10) return;
 
-        Map<String, StatEntry> statsObj = new HashMap<>();
-        long totalXp = 0;
-        int totalLevel = 0;
+		Map<String, StatEntry> statsObj = new HashMap<>();
+		long totalXp = 0;
+		int totalLevel = 0;
 
-        for (Skill s : Skill.values()) {
-            if (s == Skill.OVERALL) continue;
-            int xp = client.getSkillExperience(s);
-            int lvl = client.getRealSkillLevel(s);
-            String name = Text.titleCase(s);
+		for (Skill s : Skill.values()) {
+			if (s == Skill.OVERALL) continue;
+			int xp = client.getSkillExperience(s);
+			int lvl = client.getRealSkillLevel(s);
+			String name = Text.titleCase(s);
 
-            statsObj.put(name, new StatEntry(lvl, xp, "skill"));
-            totalXp += xp;
-            totalLevel += lvl;
-        }
-        statsObj.put("Overall", new StatEntry(totalLevel, totalXp, "skill"));
+			statsObj.put(name, new StatEntry(lvl, xp, "skill"));
+			totalXp += xp;
+			totalLevel += lvl;
+		}
+		statsObj.put("Overall", new StatEntry(totalLevel, totalXp, "skill"));
 
-        uploadData(source, new ArrayList<>(), statsObj);
+		uploadData(source, new ArrayList<>(), statsObj);
 	}
 
-	// Networking
 	private void uploadData(String source, List<LogItem> items, Map<String, StatEntry> stats) {
 		if (items.isEmpty() && stats == null) return;
 
@@ -244,7 +222,7 @@ public class CloggerPlugin extends Plugin
 				.build();
 
 		okHttpClient.newCall(request).enqueue(new Callback() {
-			@Override public void onFailure(Call call, IOException e) { log.debug("Upload failed"); }
+			@Override public void onFailure(Call call, IOException e) {}
 			@Override public void onResponse(Call call, Response response) { response.close(); }
 		});
 	}
@@ -253,23 +231,16 @@ public class CloggerPlugin extends Plugin
 		uploadData(source, items, null);
 	}
 
-	// =========================================================================
-	// Collection log logic (Loot & Chat)
-	// =========================================================================
-
-	//Subscribe to npc drops
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event) {
 		handleLoot(event.getNpc().getName(), "npc_loot", event.getItems());
 	}
 
-	//Subscribe to other methods of receiving drops
 	@Subscribe
 	public void onLootReceived(LootReceived event) {
 		handleLoot(event.getName(), "container_loot", event.getItems());
 	}
 
-	//Process loot
 	private void handleLoot(String sourceName, String type, Collection<ItemStack> items) {
 		List<LogItem> dropsToSend = new ArrayList<>();
 		long now = System.currentTimeMillis();
@@ -280,7 +251,6 @@ public class CloggerPlugin extends Plugin
 				updateDedup(item.getId());
 				sessionClogCache.put(item.getId(), sessionClogCache.getOrDefault(item.getId(), 0) + item.getQuantity());
 
-				//log.info("--- DROP: {} x{} ({}) ---", itemName, item.getQuantity(), sourceName);
 				dropsToSend.add(LogItem.builder().itemId(item.getId()).quantity(item.getQuantity())
 						.name(itemName).source(type).timestamp(now).build());
 			}
@@ -288,13 +258,11 @@ public class CloggerPlugin extends Plugin
 		uploadData(type, dropsToSend);
 	}
 
-	//Subscribe to chat messages and send them to be processed for drops
 	@Subscribe
 	public void onChatMessage(ChatMessage event) {
 		clientThread.invokeLater(() -> processChatMessage(event));
 	}
 
-	//Parse chat message for drops on the collection log
 	private void processChatMessage(ChatMessage event) {
 		ChatMessageType type = event.getType();
 		String message = event.getMessage();
@@ -312,7 +280,6 @@ public class CloggerPlugin extends Plugin
 		if (itemName != null) processChatUnlock(itemName);
 	}
 
-	//Process chat unlocks
 	private void processChatUnlock(String rawName) {
 		String cleanName = Text.removeTags(rawName);
 		int itemId = findIdByName(cleanName);
@@ -320,7 +287,6 @@ public class CloggerPlugin extends Plugin
 		updateDedup(itemId);
 		sessionClogCache.put(itemId, sessionClogCache.getOrDefault(itemId, 0) + 1);
 
-		//log.info("--- CHAT UNLOCK: {} (ID: {}) ---", cleanName, itemId);
 		List<LogItem> dropsToSend = Collections.singletonList(LogItem.builder()
 				.itemId(itemId).quantity(1).name(cleanName).source("chat_unlock")
 				.timestamp(System.currentTimeMillis()).build());
@@ -331,41 +297,32 @@ public class CloggerPlugin extends Plugin
 		long now = System.currentTimeMillis();
 		return (itemId == lastUnlockId && (now - lastUnlockTime < 3000));
 	}
+
 	private void updateDedup(int itemId) {
 		lastUnlockId = itemId;
 		lastUnlockTime = System.currentTimeMillis();
 	}
-	private int findIdByName(String name) {
-		// Search for all items with this name
-		List<ItemPrice> results = itemManager.search(name);
 
-		// We look for an item that matches the name exactly AND is in our allow list
+	private int findIdByName(String name) {
+		List<ItemPrice> results = itemManager.search(name);
 		for (ItemPrice item : results) {
 			if (item.getName().equalsIgnoreCase(name) && collectionLogAllowList.contains(item.getId())) {
 				return item.getId();
 			}
 		}
-
-		// If exact match fails, check if ANY result is in the allow list
 		for (ItemPrice item : results) {
 			if (collectionLogAllowList.contains(item.getId())) {
 				return item.getId();
 			}
 		}
-
 		return -1;
 	}
-
-	// =========================================================================
-	// Auto-sync Engine
-	// =========================================================================
 
 	@Subscribe
 	public void onGameTick(GameTick event) {
 		if (loginTick != -1 && !baselineCaptured) {
 			if (client.getTickCount() - loginTick > LOGIN_GRACE_TICKS) {
 				captureCurrentStats();
-				//log.info("Clogger: Stats settled. Baseline captured.");
 				loginTick = -1;
 			}
 		}
@@ -384,101 +341,73 @@ public class CloggerPlugin extends Plugin
 			sessionData.clear();
 		} else if (isLogOpen && !currentlyOpen) {
 			isLogOpen = false;
-			finishBatchedSession();
+			finishSession();
 		}
 
-		// Handle batched session finish
-		if (gameTickToSync != null && client.getTickCount() >= gameTickToSync) {
-			//log.info("Batch delay complete. Uploading {} items.", sessionData.size());
-			uploadData("active_session", new ArrayList<>(sessionData));
-			sessionData.clear();
-			gameTickToSync = null;
+		if (isLogOpen) {
+			scrapeCurrentPage();
 		}
 	}
 
-	private void finishBatchedSession() {
-		if (sessionData.isEmpty()) {
-			log.debug("Session closed, but no new data to send.");
-			return;
-		}
-		// Start batching countdown when log closes
-		//log.info("Session Complete. Starting batch delay for {} items.", sessionData.size());
-		gameTickToSync = client.getTickCount() + SYNC_DELAY_TICKS;
-	}
+	//Gather collection log info from the current page we have open
+	private void scrapeCurrentPage() {
+		long now = System.currentTimeMillis();
 
-	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded event) {
-		// Collection Log widget loaded - enable auto-search trigger
-		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
-			triggerSyncAllowed = true;
-			log.debug("Collection Log opened. Auto-search enabled.");
-		}
-	}
+		for (int i = 0; i < 100; i++) {
+			Widget w = client.getWidget(InterfaceID.COLLECTION_LOG, i);
+			if (w != null && w.getDynamicChildren() != null) {
+				for (Widget child : w.getDynamicChildren()) {
+					int displayId = child.getItemId();
+					if (displayId != -1 && displayId != 6512) {
+						if (child.getOpacity() == 0 && !child.isHidden()) {
+							int currentQty = child.getItemQuantity();
+							if (currentQty <= 0) currentQty = 1;
 
-	@Subscribe
-	public void onScriptPreFired(ScriptPreFired event) {
-		if (event.getScriptId() == 4100) {
-			Object[] args = event.getScriptEvent().getArguments();
+							String name = itemManager.getItemComposition(displayId).getName();
 
-			int displayId = (int) args[1]; // The "Fake" ID from the screen
-			int quantity = (int) args[2];
+							Integer realId;
+							if (collectionLogAllowList.contains(displayId)) {
+								realId = displayId;
+							} else {
+								realId = realIdMap.get(name);
+							}
 
-			// 1. Get the name of the item on screen
-			String name = itemManager.getItemComposition(displayId).getName();
+							if (realId != null) {
+								int cachedQty = sessionClogCache.getOrDefault(realId, -1);
+								if (currentQty != cachedQty) {
+									sessionClogCache.put(realId, currentQty);
 
-			// 2. Determine "Real" ID: If the displayId is explicitly in our allow list, trust it.
-			Integer realId;
-			if (collectionLogAllowList.contains(displayId)) {
-				realId = displayId;
-			} else {
-				// Fallback, look up by name (collapses variants, but handles weird display IDs)
-				realId = realIdMap.get(name);
-			}
+									boolean alreadyQueued = false;
+									for (LogItem li : sessionData) {
+										if (li.getItemId() == realId && li.getQuantity() == currentQty) {
+											alreadyQueued = true;
+											break;
+										}
+									}
 
-			if (realId != null) {
-				int cachedQty = sessionClogCache.getOrDefault(realId, -1);
-
-				if (quantity != cachedQty) {
-					sessionClogCache.put(realId, quantity);
-
-					// Check if we already queued this exact update
-					boolean alreadyQueued = false;
-					for (LogItem li : sessionData) {
-						if (li.getItemId() == realId && li.getQuantity() == quantity) {
-							alreadyQueued = true;
-							break;
+									if (!alreadyQueued) {
+										sessionData.add(LogItem.builder()
+												.itemId(realId)
+												.quantity(currentQty)
+												.name(name)
+												.source("active_session")
+												.timestamp(now).build());
+									}
+								}
+							}
 						}
-					}
-
-					if (!alreadyQueued) {
-						long now = System.currentTimeMillis();
-						sessionData.add(LogItem.builder()
-								.itemId(realId) // Sends 13273
-								.quantity(quantity)
-								.name(name)
-								.source("active_session")
-								.timestamp(now).build());
-						// log.debug("Captured: {} (Display: {} -> Real: {})", name, displayId, realId);
 					}
 				}
 			}
 		}
 	}
 
-	@Subscribe
-	public void onScriptPostFired(ScriptPostFired event) {
-		// Script 7797 is the collection log UI script
-		// When it fires and auto-search is allowed, trigger search to populate all items
-		if (event.getScriptId() == 7797 && triggerSyncAllowed) {
-			clientThread.invokeLater(() -> {
-				//log.info("Auto-triggering collection log search to populate items...");
-				// Simulate clicking "Search" then "Back" to force population of all items
-				client.menuAction(-1, 40697932, MenuAction.CC_OP, 1, -1, "Search", null);
-				client.menuAction(-1, 40697932, MenuAction.CC_OP, 1, -1, "Back", null);
-
-				triggerSyncAllowed = false;
-			});
+	private void finishSession() {
+		if (sessionData.isEmpty()) {
+			return;
 		}
+		uploadData("active_session", new ArrayList<>(sessionData));
+		sessionData.clear();
 	}
 
 	@Provides
