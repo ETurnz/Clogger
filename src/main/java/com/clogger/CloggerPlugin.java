@@ -99,10 +99,10 @@ public class CloggerPlugin extends Plugin
 		derivedClient = okHttpClient.newBuilder().addInterceptor(chain -> {
 			long t1 = System.nanoTime();
 			Request request = chain.request();
-			log.info("Sending request {} on {}", request.url(), chain.connection());
+			//log.info("Sending request {} on {}", request.url(), chain.connection());
 			Response response = chain.proceed(request);
 			long t2 = System.nanoTime();
-			log.info("Received response for {} in {}ms", response.request().url(), (t2 - t1) / 1e6d);
+			//log.info("Received response for {} in {}ms", response.request().url(), (t2 - t1) / 1e6d);
 			return response;
 		}).build();
 
@@ -336,6 +336,21 @@ public class CloggerPlugin extends Plugin
 
 	// Filters incoming loot against the allow-list, caches it, and stages the valid items for HTTP transmission
 	private void handleLoot(String sourceName, String type, Collection<ItemStack> items) {
+		int currentTick = client.getTickCount();
+
+		StringBuilder sigBuilder = new StringBuilder();
+		for (ItemStack item : items) {
+			sigBuilder.append(item.getId()).append(":").append(item.getQuantity()).append(";");
+		}
+		String signature = sigBuilder.toString();
+
+		if (currentTick == lastLootTick && signature.equals(lastLootSignature)) {
+			return; // Skip duplicate overlapping event
+		}
+
+		lastLootTick = currentTick;
+		lastLootSignature = signature;
+
 		List<LogItem> dropsToSend = new ArrayList<>();
 		long now = System.currentTimeMillis();
 
