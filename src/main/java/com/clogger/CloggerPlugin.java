@@ -61,9 +61,11 @@ public class CloggerPlugin extends Plugin
 	private static final Pattern CLAN_CLOG_REGEX = Pattern.compile("received a new collection log item: (.*) \\(\\d+/\\d+\\)");
 	private int lastUnlockId = -1;
 	private long lastUnlockTime = 0;
+	private int lastLootTick = -1;
+	private String lastLootSignature = "";
 
 	private boolean isLogOpen = false;
-	private final List<LogItem> sessionData = new ArrayList<>();
+	private final Map<Integer, LogItem> sessionData = new LinkedHashMap<>();
 
 	private static class StatEntry {
 		int level; long xp; String type;
@@ -418,16 +420,10 @@ public class CloggerPlugin extends Plugin
 						if (currentQty != cachedQty) {
 							sessionClogCache.put(realId, currentQty);
 
-							boolean alreadyQueued = false;
-							for (LogItem li : sessionData) {
-								if (li.getItemId() == realId && li.getQuantity() == currentQty) {
-									alreadyQueued = true;
-									break;
-								}
-							}
+							boolean alreadyQueued = sessionData.containsKey(realId) && sessionData.get(realId).getQuantity() == currentQty;
 
 							if (!alreadyQueued) {
-								sessionData.add(LogItem.builder()
+								sessionData.put(realId, LogItem.builder()
 										.itemId(realId)
 										.quantity(currentQty)
 										.name(name)
@@ -441,12 +437,23 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Allows developers to trigger a simulated drop for local testing and debugging
+	@Subscribe
+	public void onCommandExecuted(CommandExecuted command) {
+		if (command.getCommand().equalsIgnoreCase("testdrop")) {
+			Collection<ItemStack> fakeLoot = new ArrayList<>();
+			fakeLoot.add(new ItemStack(4151, 1, null));
+			handleLoot("Fake Boss", "npc_loot", fakeLoot);
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "New item added to your collection log: Abyssal whip", null);
+		}
+	}
+
 	// Bundles any queued collection log entries from the active session and uploads them to the API
 	private void finishSession() {
 		if (sessionData.isEmpty()) {
 			return;
 		}
-		uploadData("active_session", new ArrayList<>(sessionData));
+		uploadData("active_session", new ArrayList<>(sessionData.values()));
 		sessionData.clear();
 	}
 
