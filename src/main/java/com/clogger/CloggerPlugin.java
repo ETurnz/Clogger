@@ -22,7 +22,9 @@ import net.runelite.client.util.Text;
 import net.runelite.http.api.item.ItemPrice;
 import okhttp3.*;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -77,7 +79,9 @@ public class CloggerPlugin extends Plugin
 	private final Queue<Payload> failedPayloads = new ConcurrentLinkedQueue<>();
 	private int consecutiveFailures = 0;
 	private ScheduledFuture<?> flushTask;
+	private ScheduledFuture<?> statsTask;
 	private OkHttpClient derivedClient;
+	private boolean statsDirty = false;
 
 	private static class StatEntry {
 		int level; long xp; String type;
@@ -107,19 +111,33 @@ public class CloggerPlugin extends Plugin
 			return response;
 		}).build();
 
-		String json = configManager.getConfiguration("clogger", "failed_payloads");
-		if (json != null && !json.isEmpty()) {
+		String legacyJson = configManager.getConfiguration("clogger", "failed_payloads");
+		if (legacyJson != null && !legacyJson.isEmpty()) {
 			try {
-				Payload[] payloads = gson.fromJson(json, Payload[].class);
-				if (payloads != null) {
-					failedPayloads.addAll(Arrays.asList(payloads));
-				}
+				Payload[] payloads = gson.fromJson(legacyJson, Payload[].class);
+				if (payloads != null) failedPayloads.addAll(Arrays.asList(payloads));
 			} catch (Exception e) {
-				log.warn("Failed to load saved Clogger payloads", e);
+				log.warn("Failed to load legacy Clogger payloads", e);
+			}
+			configManager.unsetConfiguration("clogger", "failed_payloads"); // Clean up old config bloat
+		}
+
+		File cloggerDir = new File(System.getProperty("user.home"), ".runelite/clogger");
+		File queueFile = new File(cloggerDir, "offline_queue.json");
+
+		if (queueFile.exists()) {
+			try {
+				String json = new String(Files.readAllBytes(queueFile.toPath()));
+				Payload[] payloads = gson.fromJson(json, Payload[].class);
+				if (payloads != null) failedPayloads.addAll(Arrays.asList(payloads));
+				queueFile.delete(); // Delete after load, shutDown will rewrite if needed
+			} catch (Exception e) {
+				log.warn("Failed to load saved Clogger payloads from disk", e);
 			}
 		}
 
 		flushTask = executor.scheduleWithFixedDelay(this::flushFailedPayloads, 1, 1, TimeUnit.MINUTES);
+		statsTask = executor.scheduleWithFixedDelay(this::processStatsTask, 15, 15, TimeUnit.MINUTES);
 	}
 
 	// Shuts down the plugin, flushes any pending stats, and clears local caches
@@ -127,15 +145,20 @@ public class CloggerPlugin extends Plugin
 	protected void shutDown() throws Exception {
 		if (baselineCaptured) checkAndSendStats("shutdown");
 		if (flushTask != null) flushTask.cancel(true);
+		if (statsTask != null) statsTask.cancel(true);
 		
 		try {
-			if (failedPayloads.isEmpty()) {
-				configManager.unsetConfiguration("clogger", "failed_payloads");
-			} else {
-				configManager.setConfiguration("clogger", "failed_payloads", gson.toJson(failedPayloads));
+			File cloggerDir = new File(System.getProperty("user.home"), ".runelite/clogger");
+			File queueFile = new File(cloggerDir, "offline_queue.json");
+
+			if (!failedPayloads.isEmpty()) {
+				if (!cloggerDir.exists()) cloggerDir.mkdirs();
+				Files.write(queueFile.toPath(), gson.toJson(failedPayloads).getBytes());
+			} else if (queueFile.exists()) {
+				queueFile.delete();
 			}
 		} catch (Exception e) {
-			log.warn("Failed to save Clogger payloads to config at shutdown", e);
+			log.warn("Failed to save Clogger payloads to disk at shutdown", e);
 		}
 		
 		sessionData.clear();
@@ -444,11 +467,19 @@ public class CloggerPlugin extends Plugin
 				loginTick = -1;
 			}
 		}
+	}
 
-		heartbeatTicks++;
-		if (heartbeatTicks >= HEARTBEAT_INTERVAL) {
+	// Flags the internal state to push a batch stat payload on the next scheduled 15-minute background routine
+	@Subscribe
+	public void onStatChanged(StatChanged event) {
+		statsDirty = true;
+	}
+
+	// Fires on a background thread every 15 minutes to package and push offloaded stat changes
+	private void processStatsTask() {
+		if (statsDirty) {
 			checkAndSendStats("heartbeat");
-			heartbeatTicks = 0;
+			statsDirty = false;
 		}
 	}
 
