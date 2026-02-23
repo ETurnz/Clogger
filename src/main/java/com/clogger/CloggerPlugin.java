@@ -26,6 +26,10 @@ import java.io.IOException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @PluginDescriptor(
@@ -41,6 +45,8 @@ public class CloggerPlugin extends Plugin
 	@Inject private ClientThread clientThread;
 	@Inject private OkHttpClient okHttpClient;
 	@Inject private Gson gson;
+	@Inject private ScheduledExecutorService executor;
+	@Inject private ConfigManager configManager;
 
 	private final Map<Integer, Integer> sessionClogCache = new HashMap<>();
 	private final Map<Skill, Integer> lastXpMap = new HashMap<>();
@@ -67,6 +73,11 @@ public class CloggerPlugin extends Plugin
 	private boolean isLogOpen = false;
 	private final Map<Integer, LogItem> sessionData = new LinkedHashMap<>();
 
+	private final Queue<Payload> failedPayloads = new ConcurrentLinkedQueue<>();
+	private int consecutiveFailures = 0;
+	private ScheduledFuture<?> flushTask;
+	private OkHttpClient derivedClient;
+
 	private static class StatEntry {
 		int level; long xp; String type;
 		public StatEntry(int level, long xp, String type) { this.level=level; this.xp=xp; this.type=type; }
@@ -84,12 +95,48 @@ public class CloggerPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception {
 		clientThread.invokeLater(this::buildAllowList);
+		
+		derivedClient = okHttpClient.newBuilder().addInterceptor(chain -> {
+			long t1 = System.nanoTime();
+			Request request = chain.request();
+			log.info("Sending request {} on {}", request.url(), chain.connection());
+			Response response = chain.proceed(request);
+			long t2 = System.nanoTime();
+			log.info("Received response for {} in {}ms", response.request().url(), (t2 - t1) / 1e6d);
+			return response;
+		}).build();
+
+		String json = configManager.getConfiguration("clogger", "failed_payloads");
+		if (json != null && !json.isEmpty()) {
+			try {
+				Payload[] payloads = gson.fromJson(json, Payload[].class);
+				if (payloads != null) {
+					failedPayloads.addAll(Arrays.asList(payloads));
+				}
+			} catch (Exception e) {
+				log.warn("Failed to load saved Clogger payloads", e);
+			}
+		}
+
+		flushTask = executor.scheduleWithFixedDelay(this::flushFailedPayloads, 1, 1, TimeUnit.MINUTES);
 	}
 
 	// Shuts down the plugin, flushes any pending stats, and clears local caches
 	@Override
 	protected void shutDown() throws Exception {
 		if (baselineCaptured) checkAndSendStats("shutdown");
+		if (flushTask != null) flushTask.cancel(true);
+		
+		try {
+			if (failedPayloads.isEmpty()) {
+				configManager.unsetConfiguration("clogger", "failed_payloads");
+			} else {
+				configManager.setConfiguration("clogger", "failed_payloads", gson.toJson(failedPayloads));
+			}
+		} catch (Exception e) {
+			log.warn("Failed to save Clogger payloads to config at shutdown", e);
+		}
+		
 		sessionData.clear();
 		sessionClogCache.clear();
 		collectionLogAllowList.clear();
@@ -225,6 +272,10 @@ public class CloggerPlugin extends Plugin
 		}
 
 		Payload payload = new Payload(username, accountHash, source, items, stats);
+		safeUpload(payload, false);
+	}
+
+	private void safeUpload(Payload payload, boolean isRetry) {
 		String json = gson.toJson(payload);
 
 		Request request = new Request.Builder()
@@ -232,10 +283,38 @@ public class CloggerPlugin extends Plugin
 				.post(RequestBody.create(MediaType.parse("application/json"), json))
 				.build();
 
-		okHttpClient.newCall(request).enqueue(new Callback() {
-			@Override public void onFailure(Call call, IOException e) {}
-			@Override public void onResponse(Call call, Response response) { response.close(); }
+		derivedClient.newCall(request).enqueue(new Callback() {
+			@Override public void onFailure(Call call, IOException e) {
+				log.error("Network synchronization failed for Collection Log payload.", e);
+				if (payload.items != null) {
+					for (LogItem item : payload.items) {
+						item.setSynchronized(false);
+					}
+				}
+				failedPayloads.add(payload);
+				if (!isRetry) {
+					consecutiveFailures++;
+					if (consecutiveFailures >= 3) {
+						clientThread.invokeLater(() -> {
+							client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "Warning: The Clogger server is currently unreachable. Your drops will be synced when the connection is restored.", null);
+						});
+						consecutiveFailures = 0;
+					}
+				}
+			}
+			@Override public void onResponse(Call call, Response response) {
+				response.close();
+				consecutiveFailures = 0;
+				executor.submit(() -> flushFailedPayloads());
+			}
 		});
+	}
+
+	private void flushFailedPayloads() {
+		Payload payload = failedPayloads.poll();
+		if (payload != null) {
+			safeUpload(payload, true);
+		}
 	}
 
 	// Helper method to upload drop data when stat updates are not required
@@ -437,7 +516,7 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
-	// Allows developers to trigger a simulated drop for local testing and debugging
+	// Trigger a simulated drop for local testing and debugging
 	@Subscribe
 	public void onCommandExecuted(CommandExecuted command) {
 		if (command.getCommand().equalsIgnoreCase("testdrop")) {

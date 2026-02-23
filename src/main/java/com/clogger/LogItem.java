@@ -12,4 +12,6 @@ public class LogItem
     private final String name;
     private final String source; // "active_session" (Total) or "npc_loot" (Increment)
     private final long timestamp;
+    @Builder.Default
+    private boolean isSynchronized = true;
 }
