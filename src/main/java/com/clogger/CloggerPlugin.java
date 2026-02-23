@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import com.google.common.hash.Hashing;
 
 @Slf4j
 @PluginDescriptor(
@@ -271,7 +272,8 @@ public class CloggerPlugin extends Plugin
 			accountHash = cachedAccountHash;
 		}
 
-		Payload payload = new Payload(username, accountHash, source, items, stats);
+		long hashedAccountHash = Hashing.sha256().hashLong(accountHash).asLong();
+		Payload payload = new Payload(username, hashedAccountHash, source, items, stats);
 		safeUpload(payload, false);
 	}
 
