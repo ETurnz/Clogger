@@ -8,6 +8,7 @@ import net.runelite.api.*;
 import net.runelite.api.events.*;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.InterfaceID;
+import net.runelite.api.widgets.ComponentID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -77,11 +78,13 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Initializes the plugin and builds the allowed collection log item list
 	@Override
 	protected void startUp() throws Exception {
 		clientThread.invokeLater(this::buildAllowList);
 	}
 
+	// Shuts down the plugin, flushes any pending stats, and clears local caches
 	@Override
 	protected void shutDown() throws Exception {
 		if (baselineCaptured) checkAndSendStats("shutdown");
@@ -93,6 +96,7 @@ public class CloggerPlugin extends Plugin
 		lastLevelMap.clear();
 	}
 
+	// Traverses the game client's internal structures to map valid collection log item IDs
 	private void buildAllowList() {
 		collectionLogAllowList.clear();
 		realIdMap.clear();
@@ -123,6 +127,7 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Monitors game state changes to capture initial stats upon login or push stats upon logout
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event) {
 		if (event.getGameState() == GameState.LOGGED_IN) {
@@ -134,6 +139,7 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Captures the local player's current username, account hash, and skill levels/experience
 	private void captureCurrentStats() {
 		if (client.getLocalPlayer() == null) return;
 		cachedUsername = client.getLocalPlayer().getName();
@@ -148,6 +154,7 @@ public class CloggerPlugin extends Plugin
 		baselineCaptured = true;
 	}
 
+	// Checks if the player's experience has changed since the last capture, and pushes an update if so
 	private void checkAndSendStats(String source) {
 		if (!baselineCaptured) return;
 		boolean changed = false;
@@ -168,6 +175,7 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Compiles the player's current total level and skill experience into a payload map for upload
 	private void uploadStats(String source) {
 		int checkTotal = 0;
 
@@ -196,6 +204,7 @@ public class CloggerPlugin extends Plugin
 		uploadData(source, new ArrayList<>(), statsObj);
 	}
 
+	// Encapsulates collection log items and skill stats into a JSON payload and transmits it asynchronously
 	private void uploadData(String source, List<LogItem> items, Map<String, StatEntry> stats) {
 		if (items.isEmpty() && stats == null) return;
 
@@ -227,20 +236,24 @@ public class CloggerPlugin extends Plugin
 		});
 	}
 
+	// Helper method to upload drop data when stat updates are not required
 	private void uploadData(String source, List<LogItem> items) {
 		uploadData(source, items, null);
 	}
 
+	// Intercepts loot drops from NPCs and forwards them for processing
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event) {
 		handleLoot(event.getNpc().getName(), "npc_loot", event.getItems());
 	}
 
+	// Intercepts loot drops from containers or external events and forwards them for processing
 	@Subscribe
 	public void onLootReceived(LootReceived event) {
 		handleLoot(event.getName(), "container_loot", event.getItems());
 	}
 
+	// Filters incoming loot against the allow-list, caches it, and stages the valid items for HTTP transmission
 	private void handleLoot(String sourceName, String type, Collection<ItemStack> items) {
 		List<LogItem> dropsToSend = new ArrayList<>();
 		long now = System.currentTimeMillis();
@@ -258,11 +271,13 @@ public class CloggerPlugin extends Plugin
 		uploadData(type, dropsToSend);
 	}
 
+	// Listens for in-game chat messages and processes them on the client thread to detect log completions
 	@Subscribe
 	public void onChatMessage(ChatMessage event) {
 		clientThread.invokeLater(() -> processChatMessage(event));
 	}
 
+	// Evaluates a chat message against regex patterns to identify standard or clan-broadcasted collection log unlocks
 	private void processChatMessage(ChatMessage event) {
 		ChatMessageType type = event.getType();
 		String message = event.getMessage();
@@ -280,6 +295,7 @@ public class CloggerPlugin extends Plugin
 		if (itemName != null) processChatUnlock(itemName);
 	}
 
+	// Resolves a plaintext item name from chat into a valid game ID and queues it for upload if it isn't a duplicate
 	private void processChatUnlock(String rawName) {
 		String cleanName = Text.removeTags(rawName);
 		int itemId = findIdByName(cleanName);
@@ -293,16 +309,19 @@ public class CloggerPlugin extends Plugin
 		uploadData("chat_unlock", dropsToSend);
 	}
 
+	// Verifies if a specific item ID was already processed within the last 3000 milliseconds to prevent duplicate uploads
 	private boolean isDuplicate(int itemId) {
 		long now = System.currentTimeMillis();
 		return (itemId == lastUnlockId && (now - lastUnlockTime < 3000));
 	}
 
+	// Updates the local deduplication cache with the most recently unlocked item ID and current timestamp
 	private void updateDedup(int itemId) {
 		lastUnlockId = itemId;
 		lastUnlockTime = System.currentTimeMillis();
 	}
 
+	// Executes a fuzzy search using the RuneLite ItemManager to map a plaintext item name to its actual game ID
 	private int findIdByName(String name) {
 		List<ItemPrice> results = itemManager.search(name);
 		for (ItemPrice item : results) {
@@ -318,6 +337,7 @@ public class CloggerPlugin extends Plugin
 		return -1;
 	}
 
+	// Executes interval-based heartbeat checks and captures baseline stats after the login grace period
 	@Subscribe
 	public void onGameTick(GameTick event) {
 		if (loginTick != -1 && !baselineCaptured) {
@@ -332,20 +352,31 @@ public class CloggerPlugin extends Plugin
 			checkAndSendStats("heartbeat");
 			heartbeatTicks = 0;
 		}
+	}
 
-		Widget collectionLog = client.getWidget(InterfaceID.COLLECTION_LOG, 0);
-		boolean currentlyOpen = collectionLog != null && !collectionLog.isHidden();
-
-		if (!isLogOpen && currentlyOpen) {
+	// Sets isLogOpen to true when the collection log widget is loaded
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded event) {
+		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
 			isLogOpen = true;
 			sessionData.clear();
-		} else if (isLogOpen && !currentlyOpen) {
+		}
+	}
+
+	// Sets isLogOpen to false when the collection log widget is closed
+	@Subscribe
+	public void onWidgetClosed(WidgetClosed event) {
+		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
 			isLogOpen = false;
 			finishSession();
 		}
+	}
 
-		if (isLogOpen) {
-			scrapeCurrentPage();
+	// Safely scrapes data from the interface after the script finishes executing
+	@Subscribe
+	public void onScriptPostFired(ScriptPostFired event) {
+		if (event.getScriptId() == ScriptID.COLLECTION_DRAW_LIST) {
+			clientThread.invokeLater(this::scrapeCurrentPage);
 		}
 	}
 
@@ -353,47 +384,55 @@ public class CloggerPlugin extends Plugin
 	private void scrapeCurrentPage() {
 		long now = System.currentTimeMillis();
 
-		for (int i = 0; i < 100; i++) {
-			Widget w = client.getWidget(InterfaceID.COLLECTION_LOG, i);
-			if (w != null && w.getDynamicChildren() != null) {
-				for (Widget child : w.getDynamicChildren()) {
-					int displayId = child.getItemId();
-					if (displayId != -1 && displayId != 6512) {
-						if (child.getOpacity() == 0 && !child.isHidden()) {
-							int currentQty = child.getItemQuantity();
-							if (currentQty <= 0) currentQty = 1;
+		Widget w = client.getWidget(ComponentID.COLLECTION_LOG_ENTRY_ITEMS);
+		if (w == null) {
+			return;
+		}
 
-							String name = itemManager.getItemComposition(displayId).getName();
+		Widget[] children = w.getDynamicChildren();
+		if (children == null) {
+			return;
+		}
 
-							Integer realId;
-							if (collectionLogAllowList.contains(displayId)) {
-								realId = displayId;
-							} else {
-								realId = realIdMap.get(name);
+		int itemsFound = 0;
+
+		for (Widget child : children) {
+			int displayId = child.getItemId();
+			if (displayId != -1 && displayId != 6512) {
+				if (child.getOpacity() == 0 && !child.isHidden()) {
+					int currentQty = child.getItemQuantity();
+					if (currentQty <= 0) currentQty = 1;
+
+					String name = itemManager.getItemComposition(displayId).getName();
+					itemsFound++;
+
+					Integer realId;
+					if (collectionLogAllowList.contains(displayId)) {
+						realId = displayId;
+					} else {
+						realId = realIdMap.get(name);
+					}
+
+					if (realId != null) {
+						int cachedQty = sessionClogCache.getOrDefault(realId, -1);
+						if (currentQty != cachedQty) {
+							sessionClogCache.put(realId, currentQty);
+
+							boolean alreadyQueued = false;
+							for (LogItem li : sessionData) {
+								if (li.getItemId() == realId && li.getQuantity() == currentQty) {
+									alreadyQueued = true;
+									break;
+								}
 							}
 
-							if (realId != null) {
-								int cachedQty = sessionClogCache.getOrDefault(realId, -1);
-								if (currentQty != cachedQty) {
-									sessionClogCache.put(realId, currentQty);
-
-									boolean alreadyQueued = false;
-									for (LogItem li : sessionData) {
-										if (li.getItemId() == realId && li.getQuantity() == currentQty) {
-											alreadyQueued = true;
-											break;
-										}
-									}
-
-									if (!alreadyQueued) {
-										sessionData.add(LogItem.builder()
-												.itemId(realId)
-												.quantity(currentQty)
-												.name(name)
-												.source("active_session")
-												.timestamp(now).build());
-									}
-								}
+							if (!alreadyQueued) {
+								sessionData.add(LogItem.builder()
+										.itemId(realId)
+										.quantity(currentQty)
+										.name(name)
+										.source("active_session")
+										.timestamp(now).build());
 							}
 						}
 					}
@@ -402,6 +441,7 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
+	// Bundles any queued collection log entries from the active session and uploads them to the API
 	private void finishSession() {
 		if (sessionData.isEmpty()) {
 			return;
@@ -410,6 +450,7 @@ public class CloggerPlugin extends Plugin
 		sessionData.clear();
 	}
 
+	// Injects and exposes the specific configuration bindings for the Clogger plugin
 	@Provides
 	CloggerConfig provideConfig(ConfigManager configManager) {
 		return configManager.getConfig(CloggerConfig.class);
