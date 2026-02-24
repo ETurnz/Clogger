@@ -101,10 +101,8 @@ public class CloggerPlugin extends Plugin
 		derivedClient = okHttpClient.newBuilder().addInterceptor(chain -> {
 			long t1 = System.nanoTime();
 			Request request = chain.request();
-			//log.info("Sending request {} on {}", request.url(), chain.connection());
 			Response response = chain.proceed(request);
 			long t2 = System.nanoTime();
-			//log.info("Received response for {} in {}ms", response.request().url(), (t2 - t1) / 1e6d);
 			return response;
 		}).build();
 
@@ -474,7 +472,7 @@ public class CloggerPlugin extends Plugin
 	// Fires on a background thread every 15 minutes to package and push offloaded stat changes
 	private void processStatsTask() {
 		if (statsDirty) {
-			checkAndSendStats("heartbeat");
+			clientThread.invokeLater(() -> checkAndSendStats("heartbeat"));
 			statsDirty = false;
 		}
 	}
@@ -559,18 +557,7 @@ public class CloggerPlugin extends Plugin
 			}
 		}
 	}
-
-	// Trigger a simulated drop for local testing and debugging
-	/*@Subscribe
-	public void onCommandExecuted(CommandExecuted command) {
-		if (command.getCommand().equalsIgnoreCase("testdrop")) {
-			Collection<ItemStack> fakeLoot = new ArrayList<>();
-			fakeLoot.add(new ItemStack(4151, 1, null));
-			handleLoot("Fake Boss", "npc_loot", fakeLoot);
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "New item added to your collection log: Abyssal whip", null);
-		}
-	}*/
-
+	
 	// Bundles any queued collection log entries from the active session and uploads them to the API
 	private void finishSession() {
 		if (sessionData.isEmpty()) {
