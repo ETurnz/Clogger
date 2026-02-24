@@ -522,9 +522,12 @@ public class CloggerPlugin extends Plugin
 		for (Widget child : children) {
 			int displayId = child.getItemId();
 			if (displayId != -1 && displayId != 6512) {
-				if (child.getOpacity() == 0 && !child.isHidden()) {
-					int currentQty = child.getItemQuantity();
-					if (currentQty <= 0) currentQty = 1;
+				if (!child.isHidden()) {
+					int currentQty = 0;
+					if (child.getOpacity() == 0) {
+						currentQty = child.getItemQuantity();
+						if (currentQty <= 0) currentQty = 1;
+					}
 
 					String name = itemManager.getItemComposition(displayId).getName();
 					itemsFound++;
