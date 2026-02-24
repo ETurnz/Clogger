@@ -63,9 +63,6 @@ public class CloggerPlugin extends Plugin
 	private long loginTick = -1;
 	private static final int LOGIN_GRACE_TICKS = 10;
 
-	private int heartbeatTicks = 0;
-	private static final int HEARTBEAT_INTERVAL = 500;
-
 	private static final Pattern GAME_CLOG_REGEX = Pattern.compile("New item added to your collection log: (.*)");
 	private static final Pattern CLAN_CLOG_REGEX = Pattern.compile("received a new collection log item: (.*) \\(\\d+/\\d+\\)");
 	private int lastUnlockId = -1;
@@ -119,7 +116,6 @@ public class CloggerPlugin extends Plugin
 			} catch (Exception e) {
 				log.warn("Failed to load legacy Clogger payloads", e);
 			}
-			configManager.unsetConfiguration("clogger", "failed_payloads"); // Clean up old config bloat
 		}
 
 		File cloggerDir = new File(System.getProperty("user.home"), ".runelite/clogger");
@@ -130,7 +126,7 @@ public class CloggerPlugin extends Plugin
 				String json = new String(Files.readAllBytes(queueFile.toPath()));
 				Payload[] payloads = gson.fromJson(json, Payload[].class);
 				if (payloads != null) failedPayloads.addAll(Arrays.asList(payloads));
-				queueFile.delete(); // Delete after load, shutDown will rewrite if needed
+				queueFile.delete();
 			} catch (Exception e) {
 				log.warn("Failed to load saved Clogger payloads from disk", e);
 			}
@@ -370,7 +366,7 @@ public class CloggerPlugin extends Plugin
 		String signature = sigBuilder.toString();
 
 		if (currentTick == lastLootTick && signature.equals(lastLootSignature)) {
-			return; // Skip duplicate overlapping event
+			return;
 		}
 
 		lastLootTick = currentTick;
@@ -565,7 +561,7 @@ public class CloggerPlugin extends Plugin
 	}
 
 	// Trigger a simulated drop for local testing and debugging
-	@Subscribe
+	/*@Subscribe
 	public void onCommandExecuted(CommandExecuted command) {
 		if (command.getCommand().equalsIgnoreCase("testdrop")) {
 			Collection<ItemStack> fakeLoot = new ArrayList<>();
@@ -573,7 +569,7 @@ public class CloggerPlugin extends Plugin
 			handleLoot("Fake Boss", "npc_loot", fakeLoot);
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "New item added to your collection log: Abyssal whip", null);
 		}
-	}
+	}*/
 
 	// Bundles any queued collection log entries from the active session and uploads them to the API
 	private void finishSession() {
