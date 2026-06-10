@@ -8,13 +8,12 @@ import net.runelite.client.config.ConfigItem;
 public interface CloggerConfig extends Config
 {
 	@ConfigItem(
-			keyName = "apiKey",
-			name = "API Key",
-			description = "The API Key for clogger.ca",
-			secret = true
+			keyName = "hideDrops",
+			name = "Hide My Drops from Homepage",
+			description = "Hide your drops from the recent drops feed on the clogger.ca homepage"
 	)
-	default String apiKey()
+	default boolean hideDrops()
 	{
-		return "";
+		return false;
 	}
 }

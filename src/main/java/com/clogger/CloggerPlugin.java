@@ -6,9 +6,7 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.events.*;
-import net.runelite.api.widgets.Widget;
-import net.runelite.api.widgets.InterfaceID;
-import net.runelite.api.widgets.ComponentID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -49,12 +47,8 @@ public class CloggerPlugin extends Plugin
 	@Inject private OkHttpClient okHttpClient;
 	@Inject private Gson gson;
 	@Inject private ScheduledExecutorService executor;
-	@Inject private ConfigManager configManager;
 
-	private final Map<Integer, Integer> sessionClogCache = new HashMap<>();
 	private final Map<Skill, Integer> lastXpMap = new HashMap<>();
-	private final Map<Skill, Integer> lastLevelMap = new HashMap<>();
-	private final Map<String, Integer> realIdMap = new HashMap<>();
 	private final Set<Integer> collectionLogAllowList = new HashSet<>();
 
 	private String cachedUsername = null;
@@ -63,6 +57,8 @@ public class CloggerPlugin extends Plugin
 	private long loginTick = -1;
 	private static final int LOGIN_GRACE_TICKS = 10;
 
+	private static final String API_URL = "https://clogger.ca/api/sync";
+
 	private static final Pattern GAME_CLOG_REGEX = Pattern.compile("New item added to your collection log: (.*)");
 	private static final Pattern CLAN_CLOG_REGEX = Pattern.compile("received a new collection log item: (.*) \\(\\d+/\\d+\\)");
 	private int lastUnlockId = -1;
@@ -70,14 +66,14 @@ public class CloggerPlugin extends Plugin
 	private int lastLootTick = -1;
 	private String lastLootSignature = "";
 
-	private boolean isLogOpen = false;
-	private final Map<Integer, LogItem> sessionData = new LinkedHashMap<>();
+	private final Map<Integer, Integer> clogSyncItems = new HashMap<>();
+	private boolean isAutoClogRetrieval = false;
+	private int tickCollectionLogScriptFired = -1;
 
 	private final Queue<Payload> failedPayloads = new ConcurrentLinkedQueue<>();
 	private int consecutiveFailures = 0;
 	private ScheduledFuture<?> flushTask;
 	private ScheduledFuture<?> statsTask;
-	private OkHttpClient derivedClient;
 	private boolean statsDirty = false;
 
 	private static class StatEntry {
@@ -88,6 +84,7 @@ public class CloggerPlugin extends Plugin
 	private static class Payload {
 		String username; long accountHash; String source;
 		List<LogItem> items; Map<String, StatEntry> stats;
+		Boolean hideDrops;
 		public Payload(String u, long a, String s, List<LogItem> i, Map<String, StatEntry> st) {
 			this.username=u; this.accountHash=a; this.source=s; this.items=i; this.stats=st;
 		}
@@ -97,24 +94,6 @@ public class CloggerPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception {
 		clientThread.invokeLater(this::buildAllowList);
-		
-		derivedClient = okHttpClient.newBuilder().addInterceptor(chain -> {
-			long t1 = System.nanoTime();
-			Request request = chain.request();
-			Response response = chain.proceed(request);
-			long t2 = System.nanoTime();
-			return response;
-		}).build();
-
-		String legacyJson = configManager.getConfiguration("clogger", "failed_payloads");
-		if (legacyJson != null && !legacyJson.isEmpty()) {
-			try {
-				Payload[] payloads = gson.fromJson(legacyJson, Payload[].class);
-				if (payloads != null) failedPayloads.addAll(Arrays.asList(payloads));
-			} catch (Exception e) {
-				log.warn("Failed to load legacy Clogger payloads", e);
-			}
-		}
 
 		File cloggerDir = new File(System.getProperty("user.home"), ".runelite/clogger");
 		File queueFile = new File(cloggerDir, "offline_queue.json");
@@ -155,18 +134,14 @@ public class CloggerPlugin extends Plugin
 			log.warn("Failed to save Clogger payloads to disk at shutdown", e);
 		}
 		
-		sessionData.clear();
-		sessionClogCache.clear();
+		clogSyncItems.clear();
 		collectionLogAllowList.clear();
-		realIdMap.clear();
 		lastXpMap.clear();
-		lastLevelMap.clear();
 	}
 
 	// Traverses the game client's internal structures to map valid collection log item IDs
 	private void buildAllowList() {
 		collectionLogAllowList.clear();
-		realIdMap.clear();
 
 		EnumComposition topLevelEnum = client.getEnum(2102);
 		if (topLevelEnum == null) return;
@@ -187,8 +162,6 @@ public class CloggerPlugin extends Plugin
 
 				for (int realId : itemListEnum.getIntVals()) {
 					collectionLogAllowList.add(realId);
-					String name = itemManager.getItemComposition(realId).getName();
-					realIdMap.put(name, realId);
 				}
 			}
 		}
@@ -203,6 +176,9 @@ public class CloggerPlugin extends Plugin
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN) {
 			if (baselineCaptured) checkAndSendStats("logout_stats");
+			isAutoClogRetrieval = false;
+			tickCollectionLogScriptFired = -1;
+			clogSyncItems.clear();
 		}
 	}
 
@@ -213,10 +189,8 @@ public class CloggerPlugin extends Plugin
 		cachedAccountHash = client.getAccountHash();
 
 		lastXpMap.clear();
-		lastLevelMap.clear();
 		for (Skill s : Skill.values()) {
 			lastXpMap.put(s, client.getSkillExperience(s));
-			lastLevelMap.put(s, client.getRealSkillLevel(s));
 		}
 		baselineCaptured = true;
 	}
@@ -291,6 +265,7 @@ public class CloggerPlugin extends Plugin
 
 		long hashedAccountHash = Hashing.sha256().hashLong(accountHash).asLong();
 		Payload payload = new Payload(username, hashedAccountHash, source, items, stats);
+		payload.hideDrops = config.hideDrops();
 		safeUpload(payload, false);
 	}
 
@@ -298,18 +273,13 @@ public class CloggerPlugin extends Plugin
 		String json = gson.toJson(payload);
 
 		Request request = new Request.Builder()
-				.url("https://clogger.ca/api/sync")
+				.url(API_URL)
 				.post(RequestBody.create(MediaType.parse("application/json"), json))
 				.build();
 
-		derivedClient.newCall(request).enqueue(new Callback() {
+		okHttpClient.newCall(request).enqueue(new Callback() {
 			@Override public void onFailure(Call call, IOException e) {
 				log.error("Network synchronization failed for Collection Log payload.", e);
-				if (payload.items != null) {
-					for (LogItem item : payload.items) {
-						item.setSynchronized(false);
-					}
-				}
 				failedPayloads.add(payload);
 				if (!isRetry) {
 					consecutiveFailures++;
@@ -344,17 +314,17 @@ public class CloggerPlugin extends Plugin
 	// Intercepts loot drops from NPCs and forwards them for processing
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event) {
-		handleLoot(event.getNpc().getName(), "npc_loot", event.getItems());
+		handleLoot("npc_loot", event.getItems());
 	}
 
 	// Intercepts loot drops from containers or external events and forwards them for processing
 	@Subscribe
 	public void onLootReceived(LootReceived event) {
-		handleLoot(event.getName(), "container_loot", event.getItems());
+		handleLoot("container_loot", event.getItems());
 	}
 
 	// Filters incoming loot against the allow-list, caches it, and stages the valid items for HTTP transmission
-	private void handleLoot(String sourceName, String type, Collection<ItemStack> items) {
+	private void handleLoot(String type, Collection<ItemStack> items) {
 		int currentTick = client.getTickCount();
 
 		StringBuilder sigBuilder = new StringBuilder();
@@ -377,10 +347,9 @@ public class CloggerPlugin extends Plugin
 			if (collectionLogAllowList.contains(item.getId())) {
 				String itemName = itemManager.getItemComposition(item.getId()).getName();
 				updateDedup(item.getId());
-				sessionClogCache.put(item.getId(), sessionClogCache.getOrDefault(item.getId(), 0) + item.getQuantity());
 
 				dropsToSend.add(LogItem.builder().itemId(item.getId()).quantity(item.getQuantity())
-						.name(itemName).source(type).timestamp(now).build());
+						.name(itemName).timestamp(now).build());
 			}
 		}
 		uploadData(type, dropsToSend);
@@ -416,10 +385,9 @@ public class CloggerPlugin extends Plugin
 		int itemId = findIdByName(cleanName);
 		if (itemId == -1 || isDuplicate(itemId)) return;
 		updateDedup(itemId);
-		sessionClogCache.put(itemId, sessionClogCache.getOrDefault(itemId, 0) + 1);
 
 		List<LogItem> dropsToSend = Collections.singletonList(LogItem.builder()
-				.itemId(itemId).quantity(1).name(cleanName).source("chat_unlock")
+				.itemId(itemId).quantity(1).name(cleanName)
 				.timestamp(System.currentTimeMillis()).build());
 		uploadData("chat_unlock", dropsToSend);
 	}
@@ -452,9 +420,16 @@ public class CloggerPlugin extends Plugin
 		return -1;
 	}
 
-	// Executes interval-based heartbeat checks and captures baseline stats after the login grace period
+	// Uploads the collection log once rendering settles and captures baseline stats after the login grace period
 	@Subscribe
 	public void onGameTick(GameTick event) {
+		int tick = client.getTickCount();
+		if (tickCollectionLogScriptFired != -1 && tickCollectionLogScriptFired + 2 < tick) {
+			tickCollectionLogScriptFired = -1;
+			flushClogSync();
+			isAutoClogRetrieval = false;
+		}
+
 		if (loginTick != -1 && !baselineCaptured) {
 			if (client.getTickCount() - loginTick > LOGIN_GRACE_TICKS) {
 				captureCurrentStats();
@@ -477,97 +452,68 @@ public class CloggerPlugin extends Plugin
 		}
 	}
 
-	// Sets isLogOpen to true when the collection log widget is loaded
+	// Collects each collection log item as the interface renders it during script 4100
 	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded event) {
-		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
-			isLogOpen = true;
-			sessionData.clear();
-		}
+	public void onScriptPreFired(ScriptPreFired event) {
+		if (event.getScriptId() != 4100) return;
+		if (client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) return;
+
+		tickCollectionLogScriptFired = client.getTickCount();
+
+		Object[] args = event.getScriptEvent().getArguments();
+		int itemId = (int) args[1];
+		int quantity = (int) args[2];
+
+		clogSyncItems.put(itemId, quantity);
 	}
 
-	// Sets isLogOpen to false when the collection log widget is closed
-	@Subscribe
-	public void onWidgetClosed(WidgetClosed event) {
-		if (event.getGroupId() == InterfaceID.COLLECTION_LOG) {
-			isLogOpen = false;
-			finishSession();
-		}
-	}
-
-	// Safely scrapes data from the interface after the script finishes executing
+	// Forces the client to render the entire collection log at once when the log is opened
 	@Subscribe
 	public void onScriptPostFired(ScriptPostFired event) {
-		if (event.getScriptId() == ScriptID.COLLECTION_DRAW_LIST) {
-			clientThread.invokeLater(this::scrapeCurrentPage);
+		if (event.getScriptId() != 7797) return;
+
+		if (client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) {
+			clogSyncItems.clear();
+			return;
 		}
+
+		if (isAutoClogRetrieval) return;
+
+		isAutoClogRetrieval = true;
+		client.menuAction(-1, 40697932, MenuAction.CC_OP, 1, -1, "Search", null);
+		client.runScript(2240);
 	}
 
-	//Gather collection log info from the current page we have open
-	private void scrapeCurrentPage() {
-		long now = System.currentTimeMillis();
-
-		Widget w = client.getWidget(ComponentID.COLLECTION_LOG_ENTRY_ITEMS);
-		if (w == null) {
-			return;
-		}
-
-		Widget[] children = w.getDynamicChildren();
-		if (children == null) {
-			return;
-		}
-
-		int itemsFound = 0;
-
-		for (Widget child : children) {
-			int displayId = child.getItemId();
-			if (displayId != -1 && displayId != 6512) {
-				if (!child.isHidden()) {
-					int currentQty = 0;
-					if (child.getOpacity() == 0) {
-						currentQty = child.getItemQuantity();
-						if (currentQty <= 0) currentQty = 1;
-					}
-
-					String name = itemManager.getItemComposition(displayId).getName();
-					itemsFound++;
-
-					Integer realId;
-					if (collectionLogAllowList.contains(displayId)) {
-						realId = displayId;
-					} else {
-						realId = realIdMap.get(name);
-					}
-
-					if (realId != null) {
-						int cachedQty = sessionClogCache.getOrDefault(realId, -1);
-						if (currentQty != cachedQty) {
-							sessionClogCache.put(realId, currentQty);
-
-							boolean alreadyQueued = sessionData.containsKey(realId) && sessionData.get(realId).getQuantity() == currentQty;
-
-							if (!alreadyQueued) {
-								sessionData.put(realId, LogItem.builder()
-										.itemId(realId)
-										.quantity(currentQty)
-										.name(name)
-										.source("active_session")
-										.timestamp(now).build());
-							}
-						}
-					}
-				}
+	// Discards staged items when the log is opened from another player's adventure log
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event) {
+		if (event.getVarbitId() == VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) {
+			if (client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) {
+				clogSyncItems.clear();
 			}
 		}
 	}
-	
-	// Bundles any queued collection log entries from the active session and uploads them to the API
-	private void finishSession() {
-		if (sessionData.isEmpty()) {
+
+	// Bundles the fully rendered collection log into one payload and uploads it as a full sync
+	private void flushClogSync() {
+		if (clogSyncItems.isEmpty()) {
 			return;
 		}
-		uploadData("active_session", new ArrayList<>(sessionData.values()));
-		sessionData.clear();
+
+		List<LogItem> items = new ArrayList<>();
+		long now = System.currentTimeMillis();
+		for (Map.Entry<Integer, Integer> entry : clogSyncItems.entrySet()) {
+			int itemId = entry.getKey();
+			int qty = entry.getValue();
+			String name = itemManager.getItemComposition(itemId).getName();
+			items.add(LogItem.builder()
+					.itemId(itemId)
+					.quantity(qty)
+					.name(name)
+					.timestamp(now).build());
+		}
+		uploadData("full_sync", items);
+		clogSyncItems.clear();
 	}
 
 	// Injects and exposes the specific configuration bindings for the Clogger plugin
